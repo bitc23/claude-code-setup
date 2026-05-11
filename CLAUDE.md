@@ -62,6 +62,23 @@ Read `~/.claude/settings.json`, then **merge** the block below into it (preserve
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/security-check.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/block-xcodebuild-test.sh",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   },
   "statusLine": {
@@ -574,6 +591,15 @@ SECRET_FILE   = re.compile(
     r"|(^|/)secrets?\.(json|ya?ml)$|(^|/)credentials?\.(json|ya?ml)$"
 )
 
+def strip_noise(s: str) -> str:
+    """Remove shell comments and quoted segments to reduce false positives.
+    Strips # comment lines then removes double- and single-quoted regions."""
+    lines = [ln for ln in s.splitlines() if not ln.lstrip().startswith('#')]
+    s = '\n'.join(lines)
+    s = re.sub(r'"[^"]*"', '""', s)
+    s = re.sub(r"'[^']*'", "''", s)
+    return s
+
 def block(reason: str, *details: str) -> None:
     print(f"Blocked: {reason}", file=sys.stderr)
     for line in details: print(f"  {line}", file=sys.stderr)
@@ -585,7 +611,7 @@ def main() -> None:
     except Exception:
         sys.exit(0)
     cmd = (data.get("tool_input") or {}).get("command", "") or ""
-    if PIPE_TO_SHELL.search(cmd):
+    if PIPE_TO_SHELL.search(strip_noise(cmd)):
         block("piped-to-shell pattern (curl/wget | sh)", cmd)
     if GIT_PUSH.search(cmd):
         try:
@@ -1042,8 +1068,8 @@ esac
 
 stripped="$(printf '%s' "$cmd" | sed -E 's/build-for-testing|test-without-building//g')"
 
-printf '%s' "$stripped" | grep -qE '\bxcodebuild\b' || exit 0
-printf '%s' "$stripped" | grep -qE '\btest\b'       || exit 0
+printf '%s' "$stripped" | grep -qE '(^|[[:space:];&(]|\|\||&&)xcodebuild([[:space:]]|$)' || exit 0
+printf '%s' "$stripped" | grep -qE '\btest\b' || exit 0
 
 if printf '%s' "$cmd" | grep -qE -- '-(only|skip)-testing:'; then
   exit 0
@@ -1086,7 +1112,7 @@ Add to `~/.claude/settings.json` hooks (merge into existing `PreToolUse` array):
 ]
 ```
 
-> Note: the hook matches on the raw command string — any Bash command containing both "xcodebuild" and "test" as words is caught, including file paths. This is conservative by design.
+> Note: the hook only fires when `xcodebuild` appears as an invoked command (at line start or after a shell separator), not merely referenced in a filename or path. This prevents false positives when editing or reading hook files themselves.
 
 ### Project-Level Build Hook
 
