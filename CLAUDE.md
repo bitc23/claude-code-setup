@@ -75,6 +75,31 @@ The status line shows context window %, 5-hour session limit, and weekly limit �
 
 ---
 
+## Token & Context Budget
+
+**This setup is intentionally heavy.** Two plugins, a SessionStart skill invocation, multiple rule files, and per-session memory loading all consume context before your first message. Expect to start each session with 10–20% context already used on a clean topic.
+
+**What burns context fastest:**
+- Reading large source files in full when you only need one function
+- Long sessions that touch many files across many topics
+- Agents returning large results inline instead of summarising
+- Loading the entire codebase instead of navigating by folder READMEs first
+
+**How to stay in budget:**
+
+| Tip | Why it helps |
+|-----|-------------|
+| Run `/compact` when context hits 50% | Compresses history; recovers ~40% of your window |
+| Keep sessions focused on one task | One feature or bug per session; start fresh for unrelated work |
+| Read READMEs before source files | Claude reads the 15-line summary, not 500-line implementations |
+| Use sub-agents for heavy analysis | Sub-agents run in their own isolated context window — summaries come back, raw data doesn't |
+| Switch to Haiku for lightweight tasks | 90% of Sonnet capability, 3× cheaper — good for search, summarisation, quick edits |
+| Write a WORKLOG handoff note and continue in a new session | Cheaper than /compact when you're already at 70%+ |
+
+**The status line** at the bottom of your terminal shows context %, 5-hour session limit, and weekly limit — color-coded green / yellow (watch it) / red (act now). When it shows `(try /compact)` next to context %, do it.
+
+---
+
 ## Starting a New Project
 
 When you start a new project, tell Claude **"set up a new project called X"** and it will create the structure below. Here is what gets created and why.
@@ -836,6 +861,104 @@ Ask Claude: **"generate instincts from this repo's git history"** after you have
 ## Project CLAUDE.md Template
 
 Copy `PROJECT-CLAUDE-TEMPLATE.md` (in this repo) to your project root as `CLAUDE.md` and fill it in. Keep it concise — long CLAUDE.md files get ignored; short ones get followed.
+
+---
+
+## Claude Code Tips & Tricks
+
+Quick reference for commands and behaviors that aren't obvious to new users.
+
+### Slash Commands
+
+| Command | What it does |
+|---------|-------------|
+| `/compact` | Compresses conversation history to free context. Use at ~50% context usage. |
+| `/clear` | Wipes the conversation and starts completely fresh. Use when switching to an unrelated task. |
+| `/insights` | Shows Claude's analysis of your session behavior — patterns being corrected repeatedly, what's working. Run every few sessions to catch drift. |
+| `/help` | Lists all available commands and keyboard shortcuts. |
+| `/memory` | Opens your persistent memory for this project — review what Claude knows about your work. |
+| `/model` | Switch between Claude models mid-session (Haiku/Sonnet/Opus). |
+| `/plugins` | Manage plugins — install, list, enable/disable. |
+| `/hooks` | Review which hooks are active in this session. |
+| `/settings` | Open settings for review or editing. |
+| `/bug` | Report a Claude Code bug directly to Anthropic with session context attached. |
+
+### Keyboard Shortcuts
+
+| Shortcut | What it does |
+|----------|-------------|
+| **Shift+Tab** | Enters Plan Mode — Claude outlines its full plan and waits for approval before executing anything. Use for every non-trivial task. |
+| **Option+T** (macOS) / **Alt+T** | Toggles extended thinking — Claude reasons longer before answering. On by default with this setup. |
+| **Ctrl+O** | Shows Claude's thinking output (verbose mode). Useful when Claude's answer seems wrong and you want to see its reasoning. |
+| **Ctrl+C** | Interrupts the current response or tool call. Use to redirect Claude mid-flight when it goes off track. |
+| **↑ arrow** | In the input field, cycles through previous messages you've sent. |
+
+### Skipping Permission Prompts
+
+By default, Claude asks for confirmation before running shell commands, editing files, and so on. Two ways to change this:
+
+**For one session — start with the `--dangerously-skip-permissions` flag:**
+```bash
+claude --dangerously-skip-permissions
+```
+This disables all confirmation prompts for the session. Only use when you've reviewed the plan and trust what Claude is about to do — mistakes may be hard to undo.
+
+**For specific tools permanently — use `allowedTools` in `~/.claude/settings.json`:**
+```json
+{
+  "allowedTools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+}
+```
+This auto-approves the listed tools without prompting but still lets hooks run. Safer than `--dangerously-skip-permissions` because your security hooks remain active.
+
+### Running Shell Commands in the Session
+
+Prefix a message with `!` to run a shell command in the current session and have the output land directly in the conversation:
+```
+! git log --oneline -10
+! npm run test
+! ls -la src/
+```
+This is useful when Claude needs the output of an interactive command to continue — for example after `gcloud auth login` or `aws sso login`.
+
+### Plan Mode (Shift+Tab)
+
+Use Plan Mode before any non-trivial task. Claude will outline its intended approach — files to read, changes to make, order of operations — and wait for your approval. This is the easiest way to catch misunderstandings before 20 files are edited in the wrong direction.
+
+Press **Shift+Tab** at the start of a message, or type your request and then press Shift+Tab to switch into plan mode.
+
+### Sub-Agents and Context Isolation
+
+The `Agent` tool spawns a sub-agent in its own isolated context window. Heavy tasks — security review, codebase exploration, large refactor analysis — run in the sub-agent's window, not yours. The sub-agent returns a summary, keeping your main window clean.
+
+If your context is high and you need something expensive: ask Claude to use a sub-agent rather than doing it inline.
+
+### /compact vs /clear
+
+- **`/compact`** — keeps the conversation; compresses old messages. Claude retains memory of the session and can continue where it left off.
+- **`/clear`** — wipes everything. Claude starts with no memory of the session. Use when switching to a completely different task, or when the context is deeply polluted by a failed direction.
+
+### Recovering from a Stuck or Looping Session
+
+If Claude is going in circles or committed to a wrong approach:
+1. **Ctrl+C** to interrupt
+2. Give a clear correction: "Stop. That approach is wrong because X. Instead, let's try Y."
+3. If badly stuck: `/clear` and restate the problem from scratch — a clean context often unblocks immediately.
+
+### Headless / Scripted Usage
+
+Claude Code can run non-interactively for automation:
+```bash
+# One-shot task, no interaction
+claude -p "summarise what changed in the last 7 git commits" --model claude-haiku-4-5
+
+# Read stdin
+echo "what does this function do?" | claude -p --model claude-haiku-4-5
+
+# Pipe output to a file
+claude -p "write a CHANGELOG entry for this week's commits" > /tmp/changelog-draft.md
+```
+This is how the nightly memory digest (see above) works — Haiku, no tools, cheap and fast.
 
 ---
 
