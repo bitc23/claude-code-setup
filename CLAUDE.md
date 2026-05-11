@@ -75,6 +75,237 @@ The status line shows context window %, 5-hour session limit, and weekly limit �
 
 ---
 
+## Starting a New Project
+
+When you start a new project, tell Claude **"set up a new project called X"** and it will create the structure below. Here is what gets created and why.
+
+### File Checklist
+
+```
+my-project/
+├── .gitignore              ← keep secrets and junk out of git
+├── .claude/
+│   └── settings.json       ← project-level hooks (e.g. kill app before build)
+├── CLAUDE.md               ← filled-in copy of PROJECT-CLAUDE-TEMPLATE.md
+├── ARCHITECTURE.md         ← source of truth for structure and phased plan
+├── WORKLOG.md              ← running log: what changed and where, per session
+├── TODO.md                 ← index only; real entries live in todo/
+├── todo/
+│   ├── bugs.md             ← bugs are priority 1
+│   ├── features.md
+│   └── tech-debt.md
+├── CHANGELOG.md            ← user-facing version history
+└── src/                    ← your actual code
+    └── module-name/
+        └── README.md       ← ≤15 lines: public types and their purpose
+```
+
+### .gitignore
+
+Every project needs one. Claude will create this at project setup:
+
+```gitignore
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vim/
+
+# Environment & secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.cert
+secrets/
+credentials.json
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn/cache
+dist/
+build/
+.next/
+.nuxt/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Go
+vendor/
+*.exe
+*.test
+
+# Rust
+target/
+
+# Java / Kotlin / Android
+*.class
+*.jar
+*.aar
+.gradle/
+build/
+local.properties
+
+# Swift / Xcode
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+DerivedData/
+*.ipa
+*.dSYM.zip
+*.dSYM
+Pods/
+
+# Logs & temp
+*.log
+*.tmp
+*.temp
+.cache/
+
+# Claude Code — session state, not source
+.claude/tasks/
+.claude/sessions/
+.claude/session-data/
+.claude/shell-snapshots/
+.claude/file-history/
+```
+
+### Standard Project Docs
+
+**ARCHITECTURE.md** — the structural source of truth. Describes what the system does, how modules are organised, and the phased implementation plan. Claude reads this first when starting any non-trivial task. Template:
+
+```markdown
+# ARCHITECTURE.md — [Project Name]
+
+## Overview
+What this system does and for whom (2–3 sentences).
+
+## Module Map
+| Module | Path | Responsibility |
+|--------|------|----------------|
+| …      | …    | …              |
+
+## Key Design Decisions
+- Why X over Y (include the constraint or reason)
+
+## Implementation Phases
+### Phase 1: [Name]
+Goal: …
+DoD (Definition of Done): …
+
+### Phase 2: [Name]
+Goal: …
+DoD: …
+```
+
+**WORKLOG.md** — append 2–3 bullets after every unit of work. This is how Claude picks up where it left off without re-reading the whole codebase.
+
+```markdown
+# WORKLOG
+
+## 2026-05-11
+- added input validation to UserService.create()
+- fixed crash in AuthMiddleware when token is expired
+- updated TODO: moved "session refresh" from features to in-progress
+```
+
+**TODO.md** — index only. Real entries live in `todo/` category files (capped at ~100 lines each; split when they grow). Bugs are always priority 1.
+
+```markdown
+# TODO
+
+## Bugs (priority 1)
+→ see todo/bugs.md
+
+## Features
+→ see todo/features.md
+
+## Tech Debt
+→ see todo/tech-debt.md
+```
+
+**CHANGELOG.md** — user-facing. One line per release. Claude appends here at the end of each phase.
+
+```markdown
+# CHANGELOG
+
+## [Unreleased]
+- …
+
+## 0.1.0 — 2026-05-11
+- Initial working build
+```
+
+### Project-Level .claude/settings.json
+
+Every project should have `.claude/settings.json` for project-specific hooks. At minimum, create an empty scaffold:
+
+```json
+{
+  "hooks": {}
+}
+```
+
+Add hooks as you discover the need (e.g. auto-quit a running app before builds — see the Xcode section for an example).
+
+### Per-Module READMEs
+
+Every folder under `src/` (or your equivalent) gets a `README.md` of ≤15 lines listing the public types and what they do. Claude reads this before opening any file in the folder. This prevents it from reading the whole codebase for every task.
+
+```markdown
+# auth/
+
+Public types:
+- `AuthService` — validates tokens, issues sessions
+- `SessionStore` — in-memory token cache with TTL
+- `AuthMiddleware` — Express middleware, reads Bearer header
+
+Do not import from: `billing/` (circular dep risk)
+```
+
+### First Commit
+
+```bash
+git init
+git add .gitignore
+git commit -m "chore: add .gitignore"
+git add CLAUDE.md ARCHITECTURE.md WORKLOG.md TODO.md CHANGELOG.md
+git commit -m "docs: add project scaffold"
+git add .claude/
+git commit -m "chore: add project Claude config"
+```
+
+---
+
 ## Code Quality
 
 ### Immutability — Critical
@@ -90,7 +321,7 @@ Always create new objects; never mutate in place. Immutable data prevents hidden
 
 ### File Organization
 
-Many small files over few large ones. Target 200–400 lines per file, 800 max. Organize by feature/domain, not type. High cohesion, low coupling.
+Many small files over few large ones. Target 200–400 lines per file, 800 max. Organize by feature/domain, not type.
 
 ### Error Handling
 
@@ -145,7 +376,7 @@ Handle errors explicitly at every level. Never silently swallow. UI-facing code 
 
 Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`
 
-**Never** add `Co-Authored-By: Claude…` or "Generated with Claude Code" footers — not in commits, not in PRs.
+**Never** add `Co-Authored-By: Claude…` or "Generated with Claude Code" footers — not in commits, not in PRs, not anywhere.
 
 **One change, one commit.** A bug fix doesn't need surrounding cleanup; a one-shot operation doesn't need a helper.
 
@@ -159,7 +390,7 @@ For every non-trivial task:
 
 1. **Research first** — search GitHub and package registries before writing new code; prefer proven libraries over hand-rolled solutions
 2. **Plan** — use `planner` agent for complex features; break into phases with clear milestones
-3. **TDD** — write tests before implementation; see Testing section
+3. **TDD** — write tests before implementation
 4. **Review** — use `code-reviewer` agent immediately after writing code
 5. **Commit** — conventional message, one logical change per commit
 
@@ -169,7 +400,7 @@ Do not add features, refactor, or introduce abstractions beyond what the task re
 
 ## Code Review
 
-Use the `code-reviewer` agent **after every code change**, before committing. Severity:
+Use the `code-reviewer` agent **after every code change**, before committing.
 
 | Level | Meaning | Action |
 |-------|---------|--------|
@@ -209,7 +440,7 @@ Avoid the last 20% of context window for large refactors or multi-file features 
 
 ## Agents & Skills
 
-**Use proactively — no need to wait for the user to ask:**
+**Use proactively — no need to wait to be asked:**
 - Complex feature → `planner` agent
 - Code written or modified → `code-reviewer` agent
 - Bug fix or new feature → `tdd-guide` agent
@@ -239,47 +470,63 @@ Claude Code maintains persistent memory at `~/.claude/projects/<encoded-path>/me
 
 ---
 
-## Session Discipline
+## Session & Project Discipline
 
-- **Low context?** Write a handoff note before stopping: what changed, what's blocked, next concrete step. Don't try to reconstruct from files.
-- **After each unit of work:** brief WORKLOG entry — what changed and where, bullet points, no prose.
-- **Read only what you need.** For large codebases: maintain per-module READMEs (≤15 lines listing public types); read the README before opening any files in that folder.
-- **On status checks or state queries:** run `git pull` before reporting — stale answers cause rework.
-- **Before reporting work complete:** invoke `superpowers:verification-before-completion` to catch gaps.
+Good session discipline is what makes Claude useful across many sessions on the same codebase — without it, every session starts cold and wastes time re-reading files.
+
+### At Session Start
+
+1. Run `git pull` — never report status or TODOs from a stale checkout
+2. Read `WORKLOG.md` — understand what was last done
+3. Read `TODO.md` — know current outstanding work; bugs are priority 1
+4. Read the memory index (`~/.claude/projects/…/memory/MEMORY.md`) for any relevant context
+
+### During Work
+
+**Stay in scope.** Work on the one thing you were asked. If you discover something that needs fixing elsewhere, add it to `todo/tech-debt.md` and continue. Don't fix unrelated things silently.
+
+**List cross-cutting changes upfront.** If a task genuinely requires touching multiple modules, name every file you intend to change before touching any of them. Give the user a chance to redirect.
+
+**Read only what you need.** For any folder you haven't visited this session, read its `README.md` first. Only open source files whose README tells you you need them. This prevents re-reading the entire codebase every session.
+
+**Phased development.** Work through the phases defined in `ARCHITECTURE.md` in order. Each phase ends with a runnable, testable build. Don't start phase N+1 until phase N's Definition of Done is met.
+
+**Library/platform first.** Before writing any helper or utility, check if the language standard library or platform already provides it. Hand-rolled solutions are maintenance debt.
+
+### After Each Unit of Work
+
+Append 2–3 bullets to `WORKLOG.md`:
+```
+## 2026-05-11
+- fixed null-deref in TokenValidator when header is missing
+- added unit test covering the empty-header case
+```
+
+Update `TODO.md` / `todo/*.md` if you completed a carry-over item or found a new one.
+
+### When Context Gets Low (~50%+)
+
+Use `/compact` to compress conversation history. When approaching the end of context, write a handoff note:
+
+```
+## Handoff — 2026-05-11 16:30
+Done: implemented email validation in UserService; tests passing
+Blocked: integration test needs a running DB — deferred
+Next: wire up the validation to the API route in routes/users.ts
+Gotcha: the `validateEmail` helper in utils/ has a known false-positive on .museum TLDs — do not remove the regex workaround
+```
+
+This note goes in `WORKLOG.md`. The next session resumes from it without re-reading everything.
+
+### Before Reporting Work Complete
+
+Invoke `superpowers:verification-before-completion` to catch gaps — missed edge cases, incomplete tests, forgotten WORKLOG updates.
 
 ---
 
-## Project-Level CLAUDE.md
+## Project CLAUDE.md Template
 
-For each project, create a `CLAUDE.md` at the repo root with at minimum:
-
-```markdown
-# CLAUDE.md — [Project Name]
-
-One-sentence description of what this project does and who it's for.
-
-## Stack & Constraints
-- Language, framework, runtime versions
-- Hard constraints (no dependencies, minimum OS version, etc.)
-
-## How to Build & Run
-\`\`\`bash
-# build command
-# test command  
-# run/dev command
-\`\`\`
-
-## Key Conventions
-- Deviations from global coding rules
-- Domain-specific naming or patterns
-- Important files or folders to read first
-
-## What Not to Do
-- Hard limits that would break the project or violate product decisions
-- Things that look tempting but are explicitly off the table
-```
-
-Keep it terse. Long CLAUDE.md files get ignored; short ones get followed.
+Copy `PROJECT-CLAUDE-TEMPLATE.md` (in this repo) to your project root as `CLAUDE.md` and fill it in. Keep it concise — long CLAUDE.md files get ignored; short ones get followed.
 
 ---
 
@@ -288,8 +535,6 @@ Keep it terse. Long CLAUDE.md files get ignored; short ones get followed.
 Skip this section if you're not working on Apple platform projects.
 
 ### Swift Coding Style
-
-Extends the general coding style above:
 
 - Prefer `let` over `var` — only use `var` when the compiler requires it
 - Use `struct` with value semantics by default; `class` only when identity or reference semantics are needed
@@ -409,7 +654,7 @@ Add to `~/.claude/settings.json` hooks (merge into existing `PreToolUse` array):
 ]
 ```
 
-> Note: the hook matches on the raw command string, so any Bash command containing both "xcodebuild" and "test" as words will be caught — including file paths that contain those words. This is by design (conservative), but be aware of it.
+> Note: the hook matches on the raw command string — any Bash command containing both "xcodebuild" and "test" as words is caught, including file paths. This is conservative by design.
 
 ### Project-Level Build Hook
 
