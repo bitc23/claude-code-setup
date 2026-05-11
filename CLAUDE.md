@@ -15,9 +15,11 @@ Open Claude Code and run:
 /plugins install superpowers
 ```
 
-**2. Install the everything-claude-code plugin**
+**2. Install the everything-claude-code plugin (optional, disabled by default)**
 
-First, register the marketplace. Add this to `~/.claude/settings.json` under the top-level object:
+This plugin adds ~200 skills but also injects ~4,000 tokens into every session's context window. Only enable it if you actively use more than 20% of its skills. If you only need a handful, copy those skill files to `~/.claude/skills/` instead.
+
+To install: register the marketplace in `~/.claude/settings.json`:
 
 ```json
 "extraKnownMarketplaces": {
@@ -35,6 +37,8 @@ Then in Claude Code run:
 /plugins install everything-claude-code
 ```
 
+Leave it disabled in `enabledPlugins` (see Step B) until you've confirmed you need it.
+
 **3. Restart Claude Code** — plugins are loaded at startup.
 
 ---
@@ -49,20 +53,10 @@ Read `~/.claude/settings.json`, then **merge** the block below into it (preserve
     "ECC_GATEGUARD": "off"
   },
   "enabledPlugins": {
-    "everything-claude-code@everything-claude-code": true,
+    "everything-claude-code@everything-claude-code": false,
     "superpowers@claude-plugins-official": true
   },
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"At the start of this session, invoke the `superpowers:using-superpowers` skill via the Skill tool before any other work. It establishes how to discover and use the rest of the superpowers skill set.\"}}'"
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -94,13 +88,18 @@ The status line shows context window %, 5-hour session limit, and weekly limit �
 
 ## Token & Context Budget
 
-**This setup is intentionally heavy.** Two plugins, a SessionStart skill invocation, multiple rule files, and per-session memory loading all consume context before your first message. Expect to start each session with 10–20% context already used on a clean topic.
+**Baseline pre-fill: ~5–7% of context window** before your first message. This is the cost of the superpowers plugin, rule files, and built-in tool schemas. It was previously 10–20% when `everything-claude-code` was enabled and a redundant `SessionStart` hook was active — both removed.
+
+**Plugin discipline is the biggest lever.** Every enabled plugin injects all its skill names into every session. `everything-claude-code` alone adds ~200 skills (~4,000 tokens). Only enable a plugin if you actively use >20% of its skills; otherwise copy the specific skills you need to `~/.claude/skills/`.
+
+**Keep language-specific rules project-scoped.** Global rules in `~/.claude/rules/` load for every project regardless of language. Move Swift, Kotlin, Python, etc. rules into the specific project's `.claude/rules/<language>/` directory so they only load when relevant.
 
 **What burns context fastest:**
 - Reading large source files in full when you only need one function
 - Long sessions that touch many files across many topics
 - Agents returning large results inline instead of summarising
 - Loading the entire codebase instead of navigating by folder READMEs first
+- Enabled plugins with large skill lists you don't actively use
 
 **How to stay in budget:**
 
@@ -492,7 +491,7 @@ Avoid the last 20% of context window for large refactors or multi-file features 
 
 **Run independent agents in parallel.** Batch unrelated tasks in the same message instead of sequential calls.
 
-**Invoke relevant skills before any response.** Even a 1% chance a skill applies means invoke it. The `superpowers:using-superpowers` skill (loaded via the SessionStart hook) explains how to discover skills at runtime.
+**Invoke relevant skills before any response.** Even a 1% chance a skill applies means invoke it. The `superpowers:using-superpowers` skill is embedded inline by the superpowers plugin at startup — no SessionStart hook needed.
 
 ---
 
