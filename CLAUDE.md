@@ -524,6 +524,315 @@ Invoke `superpowers:verification-before-completion` to catch gaps — missed edg
 
 ---
 
+## Project Security & Automation
+
+These are project-level additions — set them up once per repo, not globally. They run silently in the background and only make noise when something goes wrong.
+
+### Project-Level Security Hooks
+
+Add these two Python scripts to your project's `.claude/hooks/` and wire them in `.claude/settings.json`.
+
+**`security-check.py`** — PreToolUse gate. Blocks two specific dangerous patterns before any Bash command runs:
+1. `curl … | sh` / `wget … | sh` — piping remote scripts to a shell
+2. `git push` with secret-like files staged (`.env`, `.pem`, `id_rsa`, `credentials.json`, etc.)
+
+```python
+#!/usr/bin/env python3
+"""PreToolUse Bash security gate."""
+from __future__ import annotations
+import json, re, subprocess, sys
+
+PIPE_TO_SHELL = re.compile(r"\b(curl|wget)\b[^|]*\|\s*(sh|bash|zsh)\b")
+GIT_PUSH      = re.compile(r"\bgit\s+push\b")
+SECRET_FILE   = re.compile(
+    r"(^|/)\.env(\.|$)|\.pem$|(^|/)id_rsa(\.|$)"
+    r"|(^|/)secrets?\.(json|ya?ml)$|(^|/)credentials?\.(json|ya?ml)$"
+)
+
+def block(reason: str, *details: str) -> None:
+    print(f"Blocked: {reason}", file=sys.stderr)
+    for line in details: print(f"  {line}", file=sys.stderr)
+    sys.exit(2)
+
+def main() -> None:
+    try:
+        data = json.load(sys.stdin)
+    except Exception:
+        sys.exit(0)
+    cmd = (data.get("tool_input") or {}).get("command", "") or ""
+    if PIPE_TO_SHELL.search(cmd):
+        block("piped-to-shell pattern (curl/wget | sh)", cmd)
+    if GIT_PUSH.search(cmd):
+        try:
+            staged = subprocess.run(
+                ["git", "diff", "--cached", "--name-only"],
+                capture_output=True, text=True, timeout=5, check=False,
+            ).stdout
+        except Exception:
+            staged = ""
+        leaks = [l for l in staged.splitlines() if SECRET_FILE.search(l)]
+        if leaks:
+            block("git push with secret-like staged files", *leaks)
+    sys.exit(0)
+
+if __name__ == "__main__":
+    try: main()
+    except Exception as exc:
+        print(f"security-check error (allowing): {exc}", file=sys.stderr)
+        sys.exit(0)
+```
+
+**`stop-check.py`** — Stop hook. Scans all files modified since the last commit (staged, unstaged, and untracked) for hardcoded credentials when Claude finishes a session. Informational only — never blocks, never raises.
+
+```python
+#!/usr/bin/env python3
+"""Stop hook — session-end secret scan."""
+from __future__ import annotations
+import re, subprocess, sys
+from pathlib import Path
+
+PATTERNS = {
+    "AWS access key":    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    "Anthropic API key": re.compile(r"\bsk-ant-[a-zA-Z0-9_\-]{20,}"),
+    "OpenAI API key":    re.compile(r"\bsk-[a-zA-Z0-9]{40,}"),
+    "GitHub token":      re.compile(r"\bgh[psoru]_[a-zA-Z0-9]{36,}"),
+    "Slack token":       re.compile(r"\bxox[bapors]-[a-zA-Z0-9\-]{10,}"),
+    "Private key":       re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+}
+MAX_FILE_SIZE = 1_000_000
+
+def candidate_files() -> list[str]:
+    out: list[str] = []
+    for cmd in (["git", "diff", "HEAD", "--name-only"],
+                ["git", "ls-files", "--others", "--exclude-standard"]):
+        try:
+            out.extend(subprocess.run(cmd, capture_output=True, text=True,
+                                      timeout=5, check=False).stdout.splitlines())
+        except Exception: continue
+    return out
+
+def main() -> None:
+    try: sys.stdin.read()
+    except Exception: pass
+    findings: list[str] = []
+    for f in candidate_files():
+        path = Path(f)
+        if not path.is_file(): continue
+        try:
+            if path.stat().st_size > MAX_FILE_SIZE: continue
+            text = path.read_text(errors="ignore")
+        except Exception: continue
+        for label, pat in PATTERNS.items():
+            if pat.search(text):
+                findings.append(f"{f}: {label}")
+                break
+    if findings:
+        print("Stop-hook: possible secrets in working tree:", file=sys.stderr)
+        for line in findings: print(f"  {line}", file=sys.stderr)
+        print("Review before committing.", file=sys.stderr)
+
+if __name__ == "__main__":
+    try: main()
+    except Exception as exc:
+        print(f"stop-check error: {exc}", file=sys.stderr)
+    sys.exit(0)
+```
+
+Make both executable:
+```bash
+chmod +x .claude/hooks/security-check.py .claude/hooks/stop-check.py
+```
+
+Wire them into `.claude/settings.json`:
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/security-check.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/stop-check.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+---
+
+### AgentShield Weekly Scan
+
+[AgentShield](https://github.com/affaan-m/everything-claude-code) (`ecc-agentshield`) is a security scanner built for AI-generated code. It grades your repo A–F and flags issues specific to LLM outputs (prompt injection vectors, over-permissioned tool calls, insecure default patterns, etc.).
+
+**How it works:** runs every Monday at 09:00 via macOS launchd, writes a timestamped log, and sends a macOS notification **only when there's a regression** (grade drops below A, or any CRITICAL/HIGH finding appears). Healthy scans are completely silent.
+
+**Step 1 — Create the scan script at `.claude/scripts/agentshield-weekly.sh`:**
+
+```bash
+#!/bin/bash
+# Weekly AgentShield regression scan.
+# Triggered by launchd. Logs every run; notifies only on regression.
+
+set -u
+
+PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"   # repo root
+APP_NAME="$(basename "$PROJECT_DIR")"                # used for log folder + notification
+LOG_DIR="${HOME}/Library/Logs/${APP_NAME}"
+mkdir -p "$LOG_DIR"
+
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+LOG_FILE="$LOG_DIR/agentshield-$TIMESTAMP.log"
+
+# launchd starts with a near-empty PATH — add common node/npm locations.
+NVM_NODE_BIN=""
+if [ -d "$HOME/.nvm/versions/node" ]; then
+    LATEST="$(ls -1 "$HOME/.nvm/versions/node" 2>/dev/null | tail -1)"
+    [ -n "$LATEST" ] && NVM_NODE_BIN="$HOME/.nvm/versions/node/$LATEST/bin"
+fi
+export PATH="/opt/homebrew/bin:/usr/local/bin:${NVM_NODE_BIN:+$NVM_NODE_BIN:}/usr/bin:/bin"
+
+cd "$PROJECT_DIR" || { echo "Cannot cd to $PROJECT_DIR" > "$LOG_FILE"; exit 1; }
+
+REPORT="$(npx --yes ecc-agentshield scan 2>&1)"
+EXIT_CODE=$?
+{
+    echo "=== AgentShield weekly scan @ $(date) ==="
+    echo "Project: $PROJECT_DIR"
+    echo "Exit: $EXIT_CODE"
+    echo
+    echo "$REPORT"
+} > "$LOG_FILE"
+
+GRADE_LINE="$(echo "$REPORT"   | grep -E '^\s*Grade:'              | head -1 | sed 's/^[[:space:]]*//')"
+SUMMARY_LINE="$(echo "$REPORT" | grep -E 'critical, .* high, .* medium' | head -1 | sed 's/^[[:space:]]*//')"
+
+REGRESSION=0
+echo "$GRADE_LINE"   | grep -qE 'Grade: A ' || REGRESSION=1
+echo "$SUMMARY_LINE" | grep -qE '[1-9][0-9]* critical|[1-9][0-9]* high' && REGRESSION=1
+[ $EXIT_CODE -ne 0 ] && REGRESSION=1
+
+if [ $REGRESSION -eq 1 ]; then
+    BODY="${GRADE_LINE:-scan failed}. $SUMMARY_LINE. Log: $LOG_FILE"
+    osascript -e "display notification \"$BODY\" with title \"AgentShield REGRESSION\" subtitle \"${APP_NAME} weekly scan\" sound name \"Sosumi\"" || true
+fi
+
+echo "" >> "$LOG_FILE"
+echo "[$(date)] Scan complete. regression=$REGRESSION" >> "$LOG_FILE"
+exit 0
+```
+
+**Step 2 — Create the launchd schedule at `.claude/scripts/com.YOURPROJECT.agentshield-weekly.plist`:**
+
+Replace `YOURPROJECT` and the script path with your actual values.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.YOURPROJECT.agentshield-weekly</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/path/to/your/project/.claude/scripts/agentshield-weekly.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key><integer>1</integer>
+        <key>Hour</key><integer>9</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/YOURPROJECT/agentshield-launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/YOURPROJECT/agentshield-launchd.err</string>
+    <key>RunAtLoad</key><false/>
+    <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>
+```
+
+**Step 3 — Install, verify, and test:**
+
+```bash
+# Install
+cp .claude/scripts/com.YOURPROJECT.agentshield-weekly.plist \
+   ~/Library/LaunchAgents/
+launchctl bootstrap "gui/$(id -u)" \
+   ~/Library/LaunchAgents/com.YOURPROJECT.agentshield-weekly.plist
+
+# Verify it's registered
+launchctl print "gui/$(id -u)/com.YOURPROJECT.agentshield-weekly" | head -20
+
+# Run immediately as a sanity check
+launchctl kickstart -k "gui/$(id -u)/com.YOURPROJECT.agentshield-weekly"
+ls -lt ~/Library/Logs/YOURPROJECT | head
+
+# Uninstall later
+launchctl bootout "gui/$(id -u)" \
+   ~/Library/LaunchAgents/com.YOURPROJECT.agentshield-weekly.plist
+rm ~/Library/LaunchAgents/com.YOURPROJECT.agentshield-weekly.plist
+```
+
+> Notes: if the Mac is asleep at 09:00 Monday, launchd runs the job on next wake. The first run triggers a one-time macOS prompt to allow osascript notifications — approve it.
+
+---
+
+### Nightly Memory Digest
+
+Once a project has been running for a few weeks, sessions can start cold without context. The nightly digest solves this by asking Claude (Haiku, no tools — cheap and fast) to summarise the last 7 days of activity into four sections:
+
+- `## Recent decisions` — architectural choices made this week
+- `## Active work` — what's in progress
+- `## Known gotchas` — traps, workarounds, non-obvious constraints
+- `## Next priorities` — what to tackle next
+
+The digest is a **reviewable artefact**, not an autonomous rewriter. You read it, cherry-pick the bullets worth keeping, and manually promote them to `CLAUDE.md`. Claude never edits `CLAUDE.md` unattended — that file is hand-curated.
+
+**How it works:**
+1. `git pull` to get latest
+2. Gather: last 100 git log lines (7 days), last 120 lines of `WORKLOG.md`, all `TODO.md` + `todo/*.md` content, first 60 lines of `CLAUDE.md`
+3. Feed to `claude -p --model claude-haiku-4-5 --tools ""` with a structured prompt
+4. Validate output: must contain all four section headers, must be ≤220 lines
+5. Write to `docs/MEMORY-DIGEST.md`, write a freshness timestamp to `.claude/.memory-curate-last-run`
+6. Send a macOS notification only on failure
+
+A SessionStart hook reads the freshness marker and warns you at the start of a session if the digest is >48h stale (so you know the context may be outdated).
+
+**To implement this for your project:** the full scripts (`memory-curate.sh`, `memory-curate-prompt.md`, `com.YOURPROJECT.memory-curate.plist`, and `memory-staleness.py`) follow the same pattern as the AgentShield setup above. Ask Claude to scaffold them once you have a running project with a few weeks of WORKLOG history — that's when the digest becomes genuinely useful.
+
+---
+
+### Instincts (Advanced)
+
+The `everything-claude-code` plugin supports *instincts* — short Markdown files in `.claude/instincts/` that encode project-specific behavioral patterns observed from git history. Unlike CLAUDE.md rules (which you write), instincts are derived from evidence: "52/52 commits follow this format" is more persuasive to Claude than "use this format."
+
+Useful instincts to set up once a project has some history:
+- Conventional commit format (scope mapping, no attribution)
+- Folder-README-first navigation
+- Tests co-committed with pure-logic changes
+- WORKLOG update after every unit of work
+
+Ask Claude: **"generate instincts from this repo's git history"** after you have 20+ commits. The `everything-claude-code:hookify` skill can also help derive instincts from session transcripts.
+
+---
+
 ## Project CLAUDE.md Template
 
 Copy `PROJECT-CLAUDE-TEMPLATE.md` (in this repo) to your project root as `CLAUDE.md` and fill it in. Keep it concise — long CLAUDE.md files get ignored; short ones get followed.
