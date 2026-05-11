@@ -17,7 +17,7 @@ Open Claude Code and run:
 
 **2. Install the everything-claude-code plugin**
 
-Add this to `~/.claude/settings.json` under the top-level object, then restart Claude Code:
+First, register the marketplace. Add this to `~/.claude/settings.json` under the top-level object:
 
 ```json
 "extraKnownMarketplaces": {
@@ -30,9 +30,10 @@ Add this to `~/.claude/settings.json` under the top-level object, then restart C
 }
 ```
 
-Then run `/plugins install everything-claude-code` in Claude Code.
-
-> Tip: verify the URL is still the current upstream before using it — search GitHub for `everything-claude-code` if unsure.
+Then in Claude Code run:
+```
+/plugins install everything-claude-code
+```
 
 **3. Restart Claude Code** — plugins are loaded at startup.
 
